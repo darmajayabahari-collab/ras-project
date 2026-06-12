@@ -233,6 +233,31 @@ select:focus{outline:none;border-color:var(--border-lit)}
 }
 .empty-feed b{color:var(--text-dim)}
 
+/* ============ BATCH ============ */
+.batchsec{margin-top:46px}
+.batch-panel{
+  display:grid;grid-template-columns:300px 1fr;gap:20px;
+  background:var(--panel);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;
+}
+.batch-drop{
+  border:1.5px dashed var(--border-lit);border-radius:var(--r-md);background:var(--bg-2);
+  display:grid;place-items:center;text-align:center;cursor:pointer;min-height:170px;padding:18px;
+  font-size:12.5px;color:var(--text-faint);line-height:1.7;transition:border-color .2s,background .2s;
+}
+.batch-drop b{color:var(--text-dim)}
+.batch-drop:hover{border-color:var(--text-faint)}
+.batch-drop.dragover{border-color:var(--mint);background:rgba(94,234,212,.06)}
+.batch-side{display:flex;flex-direction:column;gap:11px}
+.batch-info{font-size:13.5px;font-weight:700;color:var(--text)}
+.batch-note{font-size:11.5px;color:var(--text-faint);line-height:1.65}
+.batch-ctl{display:flex;gap:8px;flex-wrap:wrap}
+.bar-wrap{height:8px;background:var(--bg-2);border:1px solid var(--border);border-radius:99px;overflow:hidden}
+.bar{height:100%;width:0;background:var(--ember-grad);transition:width .3s}
+.batch-stat{font-size:12px;color:var(--text-dim);min-height:16px}
+.batch-thumbs{display:flex;gap:8px;flex-wrap:wrap}
+.bthumb{width:62px;height:62px;object-fit:cover;border-radius:8px;border:1px solid var(--border)}
+@media (max-width:880px){.batch-panel{grid-template-columns:1fr}}
+
 /* ============ MODAL ============ */
 dialog{
   background:var(--panel);color:var(--text);border:1px solid var(--border-lit);
@@ -319,6 +344,29 @@ footer{text-align:center;color:var(--text-faint);font-size:11px;padding:26px;let
       <button class="btn" id="btnDice" title="Generate ulang dengan seed acak">🎲 Acak</button>
       <span class="queue-pill" id="queuePill"></span>
       <span class="gen-status" id="genStatus"></span>
+    </div>
+  </section>
+
+  <section class="batchsec">
+    <div class="g-head"><h3>BATCH .TXT</h3><div class="rule"></div></div>
+    <div class="batch-panel">
+      <div class="batch-drop" id="batchDrop" tabindex="0" role="button" aria-label="Unggah file txt berisi prompt">
+        <span>📄 Seret file <b>.txt</b> ke sini<br>(1 prompt per baris, baris diawali # dilewati)<br>atau <b>klik untuk pilih file</b></span>
+        <input type="file" id="batchFile" accept=".txt,text/plain" hidden>
+      </div>
+      <div class="batch-side">
+        <div class="batch-info" id="batchInfo">Belum ada file dimuat.</div>
+        <p class="batch-note">Semua hasil batch <b>otomatis terunduh</b> ke folder Downloads (nama file: ras_0001_seed.jpg, dst). Rasio dan Mode Flat Vector mengikuti pengaturan Mixer di atas. Saat Chrome bertanya "Download multiple files", klik <b>Allow</b>. Prompt yang gagal bisa diunduh ulang sebagai .txt untuk dijalankan lagi.</p>
+        <div class="batch-ctl">
+          <button class="btn" id="batchStart" disabled>▶ Mulai</button>
+          <button class="btn" id="batchPause" disabled>⏸ Jeda</button>
+          <button class="btn" id="batchStop" disabled>■ Stop</button>
+          <button class="btn tiny" id="batchFailDl" style="display:none">⬇ Daftar gagal (.txt)</button>
+        </div>
+        <div class="bar-wrap"><div class="bar" id="batchBar"></div></div>
+        <div class="batch-stat" id="batchStat"></div>
+        <div class="batch-thumbs" id="batchThumbs"></div>
+      </div>
     </div>
   </section>
 
@@ -537,7 +585,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
 function buildImageUrls(prompt,w,h,seed){
   const q=new URLSearchParams({width:w,height:h,seed:String(seed),model:imgModel(),referrer:REFERRER});
-  if(apiKey()) q.set('key',apiKey());
+  if(apiKey()){ q.set('key',apiKey()); q.set('token',apiKey()); }
   const enc=encodeURIComponent(prompt);
   return [
     `https://gen.pollinations.ai/image/${enc}?${q}`,
@@ -573,38 +621,50 @@ async function countdown(ms){
   }
 }
 
-async function runJob(job){
-  const {prompt,w,h,seed,card}=job;
-  const wrap=card.querySelector('.img-wrap');
-  wrap.innerHTML='<div class="shimmer"></div><div class="wait">FLUX sedang melukis…<br>(10–60 detik)</div>';
-  $('genStatus').textContent='Menggenerate seed '+seed+'…'; $('genStatus').className='gen-status';
-
+/* fetch satu gambar — dipakai mode kartu & mode batch */
+async function fetchImageBlob(prompt,w,h,seed,onStatus){
   const urls=buildImageUrls(prompt,w,h,seed);
   let lastErr='';
   for(const url of urls){
     for(let attempt=1; attempt<=3; attempt++){
       try{
-        const resp=await fetch(url);
+        const opts = apiKey() ? {headers:{'Authorization':'Bearer '+apiKey()}} : {};
+        const resp=await fetch(url,opts);
         if(resp.status===429){
           const ra=parseInt(resp.headers.get('retry-after'))||18;
           lastErr='429 rate limit';
-          wrap.querySelector('.wait').innerHTML=`Server padat (429).<br>Coba lagi dalam ${ra} dtk… (percobaan ${attempt}/3)`;
+          onStatus&&onStatus(`Server padat (429). Coba lagi dalam ${ra} dtk… (percobaan ${attempt}/3)`);
           await sleep(ra*1000); continue;
         }
-        if(resp.status===401||resp.status===402){
-          fail(card,'Server menolak mode anonim (HTTP '+resp.status+'). Pasang API key gratis di ⚙ Pengaturan (login GitHub di enter.pollinations.ai).');
-          return;
-        }
-        if(resp.status===422){ fail(card,'Prompt ditolak moderasi konten (422). Ubah kata-kata prompt lalu coba lagi.'); return; }
+        if(resp.status===403) throw {fatal:true,msg:'Key valid tapi ditolak untuk model '+imgModel()+' (HTTP 403). Di enter.pollinations.ai → Key Management, ubah pembatasan Models key-mu jadi "all models allowed".'};
+        if(resp.status===401||resp.status===402) throw {fatal:true,msg:'Server menolak request (HTTP '+resp.status+'). Pastikan API key terpasang di ⚙ Pengaturan dan saldo pollen akunmu tidak nol.'};
+        if(resp.status===422) throw {fatal:false,msg:'Prompt ditolak moderasi konten (422). Ubah kata-kata prompt lalu coba lagi.'};
         if(!resp.ok){ lastErr='HTTP '+resp.status; break; }
         const blob=await resp.blob();
         if(!blob.type.startsWith('image/')){ lastErr='bukan gambar'; break; }
-        showImage(card,blob,prompt,seed);
-        return;
-      }catch(e){ lastErr=e.message||'jaringan'; break; }
+        return blob;
+      }catch(e){
+        if(e&&typeof e.fatal!=='undefined') throw e;
+        lastErr=(e&&e.message)||'jaringan'; break;
+      }
     }
   }
-  fail(card,'Gagal ('+lastErr+'). Klik ↻ Variasi untuk mencoba lagi.');
+  throw {fatal:false,msg:'Gagal ('+lastErr+'). Klik ↻ Variasi untuk mencoba lagi.'};
+}
+
+async function runJob(job){
+  const {prompt,w,h,seed,card}=job;
+  const wrap=card.querySelector('.img-wrap');
+  wrap.innerHTML='<div class="shimmer"></div><div class="wait">FLUX sedang melukis…<br>(10–60 detik)</div>';
+  $('genStatus').textContent='Menggenerate seed '+seed+'…'; $('genStatus').className='gen-status';
+  try{
+    const blob=await fetchImageBlob(prompt,w,h,seed,msg=>{
+      const wt=wrap.querySelector('.wait'); if(wt) wt.innerHTML=msg.replace(/\. /g,'.<br>');
+    });
+    showImage(card,blob,prompt,seed);
+  }catch(e){
+    fail(card,(e&&e.msg)||'Gagal tanpa keterangan.');
+  }
 }
 
 function showImage(card,blob,prompt,seed){
@@ -679,6 +739,90 @@ function makeCard(prompt,w,h,seed){
     window.scrollTo({top:0,behavior:'smooth'});
   });
   return card;
+}
+
+/* ===================== BATCH .TXT ===================== */
+const batchState={prompts:[],running:false,paused:false,stop:false,done:0,failCnt:0,failed:[]};
+const bDrop=$('batchDrop'), bFile=$('batchFile'), bInfo=$('batchInfo'),
+      bStart=$('batchStart'), bPause=$('batchPause'), bStop=$('batchStop'),
+      bBar=$('batchBar'), bStat=$('batchStat'), bThumbs=$('batchThumbs'), bFailBtn=$('batchFailDl');
+
+;['dragover','dragenter'].forEach(ev=>bDrop.addEventListener(ev,e=>{e.preventDefault();bDrop.classList.add('dragover');}));
+;['dragleave','drop'].forEach(ev=>bDrop.addEventListener(ev,e=>{e.preventDefault();bDrop.classList.remove('dragover');}));
+bDrop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0]; if(f) loadTxt(f);});
+bDrop.addEventListener('click',()=>bFile.click());
+bDrop.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();bFile.click();} });
+bFile.addEventListener('change',()=>{ if(bFile.files[0]) loadTxt(bFile.files[0]); });
+
+function loadTxt(f){
+  if(!/\.txt$/i.test(f.name) && f.type!=='text/plain'){ bInfo.textContent='File harus .txt'; return; }
+  const r=new FileReader();
+  r.onload=()=>{
+    batchState.prompts=r.result.split(/\r?\n/).map(s=>s.trim()).filter(s=>s && !s.startsWith('#'));
+    bInfo.textContent=batchState.prompts.length+' prompt termuat dari '+f.name;
+    bStart.disabled=batchState.prompts.length===0;
+    resetBatchUI();
+  };
+  r.readAsText(f);
+}
+function resetBatchUI(){
+  batchState.done=0;batchState.failCnt=0;batchState.failed=[];
+  bBar.style.width='0%'; bStat.textContent=''; bThumbs.innerHTML=''; bFailBtn.style.display='none';
+}
+
+bStart.addEventListener('click', runBatch);
+bPause.addEventListener('click',()=>{ batchState.paused=!batchState.paused; bPause.textContent=batchState.paused?'▶ Lanjut':'⏸ Jeda'; });
+bStop.addEventListener('click',()=>{ batchState.stop=true; batchState.paused=false; });
+bFailBtn.addEventListener('click',()=>{
+  saveBlob(new Blob([batchState.failed.join('\n')],{type:'text/plain'}),'prompt_gagal.txt');
+});
+
+async function runBatch(){
+  if(batchState.running||!batchState.prompts.length) return;
+  batchState.running=true;batchState.paused=false;batchState.stop=false; resetBatchUI();
+  bStart.disabled=true;bPause.disabled=false;bStop.disabled=false;bPause.textContent='⏸ Jeda';
+  const [w,h]=$('aspect').value.split('x').map(Number);
+  const total=batchState.prompts.length;
+  const suffix=$('flatVector').checked
+    ? '. Simple flat vector illustration, minimalist clean design, solid colors, white background, modern detailed scalable vector style, perfect for stock illustration' : '';
+  for(let i=0;i<total;i++){
+    if(batchState.stop) break;
+    while(batchState.paused && !batchState.stop){ bStat.textContent='⏸ Dijeda di '+i+'/'+total; await sleep(400); }
+    if(batchState.stop) break;
+    const seed=Math.floor(Math.random()*1e9);
+    bStat.textContent='Menggenerate '+(i+1)+'/'+total+' (seed '+seed+')…';
+    try{
+      const blob=await fetchImageBlob(batchState.prompts[i]+suffix,w,h,seed,
+        msg=>{ bStat.textContent=(i+1)+'/'+total+' — '+msg; });
+      saveBlob(blob,'ras_'+String(i+1).padStart(4,'0')+'_'+seed+'.jpg');
+      addThumb(blob);
+      batchState.done++;
+    }catch(e){
+      batchState.failCnt++; batchState.failed.push(batchState.prompts[i]);
+      if(e&&e.fatal){ bStat.textContent='Batch berhenti: '+e.msg; break; }
+    }
+    bBar.style.width=Math.round(((i+1)/total)*100)+'%';
+    if(i<total-1 && !batchState.stop) await sleep(genDelayMs());
+  }
+  batchState.running=false; bStart.disabled=false; bPause.disabled=true; bStop.disabled=true;
+  if(!bStat.textContent.startsWith('Batch berhenti'))
+    bStat.textContent='Selesai: '+batchState.done+' berhasil, '+batchState.failCnt+' gagal'+(batchState.stop?' (dihentikan manual)':'')+'.';
+  if(batchState.failed.length) bFailBtn.style.display='inline-block';
+}
+
+function saveBlob(blob,name){
+  const u=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(u),60000);   // beri waktu Chrome memproses unduhan
+}
+function addThumb(blob){
+  const u=URL.createObjectURL(blob);
+  const im=new Image(); im.src=u; im.className='bthumb'; im.alt='';
+  bThumbs.prepend(im);
+  while(bThumbs.children.length>6){
+    const last=bThumbs.lastElementChild; URL.revokeObjectURL(last.src); last.remove();
+  }
 }
 
 /* ============================ SETTINGS ============================ */
